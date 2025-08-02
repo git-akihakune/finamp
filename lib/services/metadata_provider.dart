@@ -1,4 +1,5 @@
 import 'package:finamp/models/finamp_models.dart';
+import 'package:finamp/services/finamp_user_helper.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:get_it/get_it.dart';
 import 'package:logging/logging.dart';
@@ -45,17 +46,19 @@ class MetadataProvider {
   static const speedControlLongTrackDuration = Duration(minutes: 15);
   static const speedControlLongAlbumDuration = Duration(hours: 3);
 
-  final MediaSourceInfo mediaSourceInfo;
+  final PlaybackInfoResponse playbackInfo;
   LyricDto? lyrics;
   bool isDownloaded;
   bool qualifiesForPlaybackSpeedControl;
 
   MetadataProvider({
-    required this.mediaSourceInfo,
+    required this.playbackInfo,
     this.lyrics,
     this.isDownloaded = false,
     this.qualifiesForPlaybackSpeedControl = false,
   });
+
+  MediaSourceInfo get mediaSourceInfo => playbackInfo.mediaSources!.first;
 
   bool get hasLyrics => mediaSourceInfo.mediaStreams.any((e) => e.type == "Lyric");
 }
@@ -70,8 +73,8 @@ metadataProvider = FutureProvider.autoDispose.family<MetadataProvider?, Metadata
 
   metadataProviderLogger.fine("Fetching metadata for '${request.item.name}' (${request.item.id})");
 
-  MediaSourceInfo? playbackInfo;
-  MediaSourceInfo? localPlaybackInfo;
+  PlaybackInfoResponse? playbackInfo;
+  PlaybackInfoResponse? localPlaybackInfo;
 
   final downloadStub = await downloadsService.getTrackInfo(id: request.item.id);
   if (downloadStub != null) {
@@ -95,28 +98,32 @@ metadataProvider = FutureProvider.autoDispose.family<MetadataProvider?, Metadata
           ? downloadItem.baseItem!.mediaStreams?.where((x) => x.type == "Lyric").toList() ?? []
           : downloadItem.baseItem!.mediaStreams ?? [];
 
-      localPlaybackInfo = MediaSourceInfo(
-        id: downloadItem.baseItem!.id,
-        protocol: "File",
-        type: "Default",
-        isRemote: false,
-        supportsTranscoding: false,
-        supportsDirectStream: false,
-        supportsDirectPlay: true,
-        isInfiniteStream: false,
-        requiresOpening: false,
-        requiresClosing: false,
-        requiresLooping: false,
-        supportsProbing: false,
-        mediaStreams: mediaStream,
-        readAtNativeFramerate: false,
-        ignoreDts: false,
-        ignoreIndex: false,
-        genPtsInput: false,
-        bitrate: bitrate,
-        container: codec,
-        name: downloadItem.baseItem!.mediaSources?.first.name,
-        size: await downloadsService.getFileSize(downloadStub),
+      localPlaybackInfo = PlaybackInfoResponse(
+        mediaSources: [
+          MediaSourceInfo(
+            id: downloadItem.baseItem!.id,
+            protocol: "File",
+            type: "Default",
+            isRemote: false,
+            supportsTranscoding: false,
+            supportsDirectStream: false,
+            supportsDirectPlay: true,
+            isInfiniteStream: false,
+            requiresOpening: false,
+            requiresClosing: false,
+            requiresLooping: false,
+            supportsProbing: false,
+            mediaStreams: mediaStream,
+            readAtNativeFramerate: false,
+            ignoreDts: false,
+            ignoreIndex: false,
+            genPtsInput: false,
+            bitrate: bitrate,
+            container: codec,
+            name: downloadItem.baseItem!.mediaSources?.first.name,
+            size: await downloadsService.getFileSize(downloadStub),
+          ),
+        ],
       );
     }
   }
@@ -131,22 +138,37 @@ metadataProvider = FutureProvider.autoDispose.family<MetadataProvider?, Metadata
       "Fetching metadata for '${request.item.name}' (${request.item.id}) from server due to missing attributes",
     );
     try {
-      playbackInfo = (await jellyfinApiHelper.getPlaybackInfo(request.item.id))?.first;
+      // playbackInfo = await jellyfinApiHelper.getPlaybackInfo(request.item.id);
+      playbackInfo = await jellyfinApiHelper.submitPlaybackInfo(
+        itemId: request.item.id,
+        playbackInfoRequest: PlaybackInfoRequest(
+          userId: GetIt.instance<FinampUserHelper>().currentUserId,
+          allowAudioStreamCopy: true,
+          audioStreamIndex: 0,
+          enableDirectPlay: false,
+          enableDirectStream: false,
+          enableTranscoding: true,
+        )
+      );
     } catch (e) {
       metadataProviderLogger.severe("Failed to fetch metadata for '${request.item.name}' (${request.item.id})", e);
       return null;
     }
 
     // update **PARTS** of playbackInfo with localPlaybackInfo if available
-    if (localPlaybackInfo != null && playbackInfo != null) {
-      playbackInfo.protocol = localPlaybackInfo.protocol;
-      playbackInfo.bitrate = localPlaybackInfo.bitrate;
+    if (localPlaybackInfo != null && (playbackInfo.mediaSources?.isNotEmpty ?? false)) {
+      playbackInfo.mediaSources!.first.protocol = localPlaybackInfo.mediaSources!.first.protocol;
+      playbackInfo.mediaSources!.first.bitrate = localPlaybackInfo.mediaSources!.first.bitrate;
       // Use lyrics mediastream from online item, but take all other streams
       // from downloaded item
-      playbackInfo.mediaStreams = playbackInfo.mediaStreams.where((x) => x.type == "Lyric").toList();
-      playbackInfo.mediaStreams.addAll(localPlaybackInfo.mediaStreams.where((x) => x.type != "Lyric"));
-      playbackInfo.container = localPlaybackInfo.container;
-      playbackInfo.size = localPlaybackInfo.size;
+      playbackInfo.mediaSources!.first.mediaStreams = playbackInfo.mediaSources!.first.mediaStreams
+          .where((x) => x.type == "Lyric")
+          .toList();
+      playbackInfo.mediaSources!.first.mediaStreams.addAll(
+        localPlaybackInfo.mediaSources!.first.mediaStreams.where((x) => x.type != "Lyric"),
+      );
+      playbackInfo.mediaSources!.first.container = localPlaybackInfo.mediaSources!.first.container;
+      playbackInfo.mediaSources!.first.size = localPlaybackInfo.mediaSources!.first.size;
     }
   }
 
@@ -155,7 +177,7 @@ metadataProvider = FutureProvider.autoDispose.family<MetadataProvider?, Metadata
     return null;
   }
 
-  final metadata = MetadataProvider(mediaSourceInfo: playbackInfo, isDownloaded: localPlaybackInfo != null);
+  final metadata = MetadataProvider(playbackInfo: playbackInfo, isDownloaded: localPlaybackInfo != null);
 
   // check if item qualifies for having playback speed control available
   if (request.checkIfSpeedControlNeeded) {
